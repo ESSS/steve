@@ -1,0 +1,7 @@
+name: steve
+
+dependencies:
+  - python
+  - requests
+  - trollius
+  - pyyaml
