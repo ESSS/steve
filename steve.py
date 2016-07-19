@@ -1,7 +1,6 @@
 from __future__ import unicode_literals, print_function, division
 
-# TODO: stuff to implement
-# * if not running, start build, otherwise just monitor
+# TODO: stuff that can be implemented/improved
 # * configure polling interval
 # * use a config file?
 # * attempt few times before giving up on requests that fail
@@ -18,7 +17,6 @@ from getpass import getpass
 
 import math
 
-import datetime
 import requests
 import subprocess
 
@@ -34,6 +32,7 @@ ALL_PLATFORMS = ['win32', 'win32d', 'win64', 'win64d', 'linux64']
 
 ESTIMATE_UNRELIABILITY = 1.25
 WATCH_INTERVAL = 10
+PRINT_INTERVAL = 1
 
 
 def main(args):
@@ -107,7 +106,7 @@ class Jobs:
     # and see what is available for the build. Note you can exchange xml by
     # json to switch the output format of API.
     BUILD_URL = 'https://eden.esss.com.br/jenkins/job/{job_name}/build?delay=0sec'
-    PROGRESS_URL = 'http://eden.esss.com.br/jenkins/job/{job_name}/lastBuild/api/json?tree=id,timestamp,estimatedDuration,building'
+    PROGRESS_URL = 'http://eden.esss.com.br/jenkins/job/{job_name}/{job_id}/api/json?tree=id,timestamp,estimatedDuration,building'
     RESULT_URL = 'http://eden.esss.com.br/jenkins/job/{job_name}/{job_id}/api/json?tree=result'
 
     STATUS_UNKNOWN = 'unknown'
@@ -125,8 +124,7 @@ class Jobs:
         self.done = {p: False for p in self.platforms}
         self.status = {p: self.STATUS_UNKNOWN for p in self.platforms}
         self.progress = {p: 0. for p in self.platforms}
-        self.start = {p: datetime.datetime.now() for p in self.platforms}
-        self.end = {p: None for p in self.platforms}
+        self.duration = {p: None for p in self.platforms}
 
     @trollius.coroutine
     def build(self, request_args):
@@ -168,20 +166,14 @@ class Jobs:
 @trollius.coroutine
 def watcher(jobs, platform, request_args):
     try:
-        platform_args = dict(platform=platform, **request_args)
+        # While it doesn't know which job exactly it is going to watch, look
+        # for most current build
+        platform_args = dict(job_id='lastBuild', platform=platform, **request_args)
 
-        # 1. start build
-        logging.debug("[{}] requesting build".format(platform))
-        build_ret = yield trollius.From(jobs.build(platform_args))
-        logging.debug("[{}] build received, is {}".format(platform, jobs.is_request_ok(build_ret)))
-        if not jobs.is_request_ok(build_ret):
-            jobs.status[platform] = jobs.STATUS_CONNECTION_ERROR
-            raise trollius.Return()
-
-        # 2. monitor progress until 'building' is false
-        job_id = None
-        building = True
-        while building:
+        # 1. monitor progress until stops building
+        waiting = True
+        building = False
+        while waiting or building:
             logging.debug("[{}] requesting monitor".format(platform))
             monitor_ret = yield trollius.From(jobs.monitor(platform_args))
             logging.debug("[{}] monitor received, is {}".format(platform, jobs.is_request_ok(monitor_ret)))
@@ -196,21 +188,42 @@ def watcher(jobs, platform, request_args):
             building = progress_content['building']
             logging.debug("[{}] monitor content: {}, {}, {}".format(platform, building, timestamp, estimated))
 
-            fixed_timestamp = time.time() - timestamp / 1000
-            if estimated > 0:
-                jobs.status[platform] = jobs.STATUS_BUILDING
-                # Jenkins estimate not very reliable, be conservative
-                fixed_estimated = ESTIMATE_UNRELIABILITY * estimated / 1000.
-                progress = fixed_timestamp / fixed_estimated
-                # Even with some unreliability factor, progress can exceed 100%
-                jobs.progress[platform] = min(progress, 0.99)
+            if not building:
+                # If not building yet, request to start a build
+                logging.debug("[{}] requesting build".format(platform))
+                build_ret = yield trollius.From(jobs.build(platform_args))
+                logging.debug("[{}] build received, is {}".format(platform, jobs.is_request_ok(build_ret)))
+                if not jobs.is_request_ok(build_ret):
+                    jobs.status[platform] = jobs.STATUS_CONNECTION_ERROR
+                    raise trollius.Return()
             else:
-                jobs.status[platform] = jobs.STATUS_UNKNOWN
+                # Once build is running, follow especially this job. This avoids
+                # external restart of job messing with this watcher
+                platform_args = dict(
+                    job_id=job_id, platform=platform, **request_args)
+                waiting = False
+                fixed_timestamp = time.time() - timestamp / 1000
+
+                # Just save first duration, as printer is a lot more frequent
+                # than watchers, so it is better to increment duration there for
+                # better feedback
+                if jobs.duration[platform] is None:
+                    jobs.duration[platform] = fixed_timestamp
+
+                if estimated > 0:
+                    jobs.status[platform] = jobs.STATUS_BUILDING
+                    # Jenkins estimate not very reliable, be conservative
+                    fixed_estimated = ESTIMATE_UNRELIABILITY * estimated / 1000.
+                    progress = fixed_timestamp / fixed_estimated
+                    # Even with some unreliability factor, progress can
+                    # exceed 100%
+                    jobs.progress[platform] = min(progress, 0.99)
+                else:
+                    jobs.status[platform] = jobs.STATUS_UNKNOWN
 
             yield trollius.sleep(WATCH_INTERVAL)
 
         # 3. once stopped building, one last request to get final status of job
-        platform_args = dict(job_id=job_id, **platform_args)
         logging.debug("[{}] requesting result".format(platform))
         result_ret = yield trollius.From(jobs.result(platform_args))
         logging.debug("[{}] result received, is {}".format(platform, jobs.is_request_ok(result_ret)))
@@ -235,7 +248,6 @@ def watcher(jobs, platform, request_args):
         jobs.status[platform] = jobs.STATUS_INTERNAL_ERROR
         logging.exception("Internal error while trying to watch job progress")
     finally:
-        jobs.end[platform] = datetime.datetime.now()
         jobs.done[platform] = True
 
 
@@ -269,9 +281,14 @@ def printer(jobs, branch, mode, platforms):
         for platform in platforms:
             pretty_platform = platform.ljust(name_width)
             status = jobs.status[platform]
-            end = jobs.end[platform] or datetime.datetime.now()
-            duration = (end - jobs.start[platform]).total_seconds()
-            pretty_duration = '{: 3d}:{:02d}'.format(int(duration // 60), int(math.floor(duration % 60)))
+            duration = jobs.duration[platform]
+            if duration is not None:
+                pretty_duration = '{: 3d}:{:02d}'.format(int(duration // 60), int(math.floor(duration % 60)))
+                if not jobs.done[platform]:
+                    jobs.duration[platform] += PRINT_INTERVAL
+            else:
+                pretty_duration = '?'
+
             if status == jobs.STATUS_UNKNOWN:
                 write_line("{}: [{}] {} / {}".format(pretty_platform, "unknown".center(progress_width, " "), "?", pretty_duration))
             elif status == jobs.STATUS_BUILDING:
@@ -299,7 +316,7 @@ def printer(jobs, branch, mode, platforms):
             else:
                 assert False, "unknown status"
 
-        yield trollius.sleep(1)
+        yield trollius.sleep(PRINT_INTERVAL)
 
 
 def read_modes_from_jobs_done(filename):
