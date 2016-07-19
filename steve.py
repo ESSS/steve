@@ -115,6 +115,8 @@ class Jobs:
     STATUS_SUCCESS = 'success'
     STATUS_FAILURE = 'failure'
     STATUS_ABORT = 'abort'
+    STATUS_CONNECTION_ERROR = 'connection_error'
+    STATUS_INTERNAL_ERROR = 'internal_error'
 
     def __init__(self, user, password, platforms):
         self.user = user
@@ -173,8 +175,7 @@ def watcher(jobs, platform, request_args):
         build_ret = yield trollius.From(jobs.build(platform_args))
         logging.debug("[{}] build received, is {}".format(platform, jobs.is_request_ok(build_ret)))
         if not jobs.is_request_ok(build_ret):
-            # TODO: use special status?
-            jobs.status[platform] = jobs.STATUS_FAILURE
+            jobs.status[platform] = jobs.STATUS_CONNECTION_ERROR
             raise trollius.Return()
 
         # 2. monitor progress until 'building' is false
@@ -185,8 +186,7 @@ def watcher(jobs, platform, request_args):
             monitor_ret = yield trollius.From(jobs.monitor(platform_args))
             logging.debug("[{}] monitor received, is {}".format(platform, jobs.is_request_ok(monitor_ret)))
             if not jobs.is_request_ok(monitor_ret):
-                # TODO: use special status?
-                jobs.status[platform] = jobs.STATUS_FAILURE
+                jobs.status[platform] = jobs.STATUS_CONNECTION_ERROR
                 raise trollius.Return()
 
             progress_content = json.loads(monitor_ret.content)
@@ -215,8 +215,7 @@ def watcher(jobs, platform, request_args):
         result_ret = yield trollius.From(jobs.result(platform_args))
         logging.debug("[{}] result received, is {}".format(platform, jobs.is_request_ok(result_ret)))
         if not jobs.is_request_ok(result_ret):
-            # TODO: use special status?
-            jobs.status[platform] = jobs.STATUS_FAILURE
+            jobs.status[platform] = jobs.STATUS_CONNECTION_ERROR
             raise trollius.Return()
 
         result = json.loads(result_ret.content)
@@ -233,7 +232,7 @@ def watcher(jobs, platform, request_args):
     except trollius.coroutines.ReturnException:
         pass
     except:
-        jobs.status[platform] = jobs.STATUS_FAILURE
+        jobs.status[platform] = jobs.STATUS_INTERNAL_ERROR
         logging.exception("Internal error while trying to watch job progress")
     finally:
         jobs.end[platform] = datetime.datetime.now()
@@ -287,10 +286,15 @@ def printer(jobs, branch, mode, platforms):
                 width = int(math.ceil(progress * progress_width))
                 write_line("{}: [{}{}] {} / {}".format(pretty_platform, "#" * width, " " * (progress_width - width), "\u001b[33m{}\u001b[0m".format('aborted'), pretty_duration))
                 done[platform] = True
-            elif status == jobs.STATUS_FAILURE:
+            elif status in (jobs.STATUS_FAILURE, jobs.STATUS_INTERNAL_ERROR, jobs.STATUS_CONNECTION_ERROR):
                 progress = jobs.progress[platform]
                 width = int(math.ceil(progress * progress_width))
-                write_line("{}: [{}{}] {} / {}".format(pretty_platform, "#" * width, " " * (progress_width - width), "\u001b[31m{}\u001b[0m".format('failed'), pretty_duration))
+                caption = {
+                    jobs.STATUS_FAILURE: 'failed',
+                    jobs.STATUS_INTERNAL_ERROR: 'internal error',
+                    jobs.STATUS_CONNECTION_ERROR: 'connection error',
+                }[status]
+                write_line("{}: [{}{}] {} / {}".format(pretty_platform, "#" * width, " " * (progress_width - width), "\u001b[31m{}\u001b[0m".format(caption), pretty_duration))
                 done[platform] = True
             else:
                 assert False, "unknown status"
