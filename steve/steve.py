@@ -28,6 +28,8 @@ import trollius
 import yaml
 from concurrent.futures.thread import ThreadPoolExecutor
 
+from .version import __version__
+
 ALL_PLATFORMS = ['win32', 'win32d', 'win64', 'win64d', 'linux64']
 
 ESTIMATE_UNRELIABILITY = 1.25
@@ -35,12 +37,26 @@ WATCH_INTERVAL = 10
 PRINT_INTERVAL = 1
 
 
-def main(args):
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-u', '--user', required=True, help='username')
-    parser.add_argument('-b', '--branch', default=None, help='branch of the CI job to trigger (defaults to current branch)')
-    parser.add_argument('-m', '--mode', default=None, help='a mode, if not provided gets first mode from .jobs_done.yaml')
-    parser.add_argument('-p', '--platforms', nargs='+', help='platforms separated by space, if not provided uses current platform')
+def run(args):
+    parser = argparse.ArgumentParser(
+        description='A tool that simplifies running Jenkins jobs from '
+                    'command-line')
+    parser.add_argument(
+        '-u', '--user', required=True, help='Username')
+    parser.add_argument(
+        '-b', '--branch', default=None, help='Branch of the CI job to trigger '
+                                             '(defaults to current branch)')
+    parser.add_argument(
+        '-m', '--mode', default=None, help='A mode, if not provided gets first '
+                                           'mode from .jobs_done.yaml (if'
+                                           ' any mode exists)')
+    parser.add_argument(
+        '-p', '--platforms', nargs='+', help='Platforms separated by space, '
+                                             'if not provided uses current '
+                                             'platform')
+    parser.add_argument(
+        '-v', '--version',
+        action='version', version='%(prog)s {}'.format(__version__))
     args = parser.parse_args(args=args)
 
     password = getpass()
@@ -95,8 +111,11 @@ def main(args):
         ))
 
     tasks = [printer_task] + watcher_tasks
-    loop.run_until_complete(trollius.wait(tasks))
+    done, pending = loop.run_until_complete(trollius.wait(tasks))
     loop.close()
+
+    if any(t.exception() is not None for t in done):
+        exit(1)
 
 
 class Jobs:
@@ -329,15 +348,3 @@ def read_modes_from_jobs_done(filename):
     with open(filename, 'r') as f:
         yml = yaml.safe_load(f)
         return yml.get('matrix').get('mode', [])
-
-
-if __name__ == '__main__':
-    # Set it to enable debug feature of trollius
-    # os.environ['TROLLIUSDEBUG'] = '1'
-
-    # Uncomment and configure for logging
-    # logger = logging.getLogger()
-    # logger.setLevel(logging.DEBUG)
-    # logger.addHandler(logging.FileHandler('steve.log'))
-
-    sys.exit(main(sys.argv[1:]))

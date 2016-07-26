@@ -1,2 +1,5 @@
 # PyCharm files
 .idea/
+
+# Python files
+*.pyc

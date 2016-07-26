@@ -5,3 +5,7 @@ dependencies:
   - requests
   - trollius
   - pyyaml
+
+environment:
+  - PYTHONPATH:
+    - {{ os.path.join(root) }}
