@@ -33,7 +33,7 @@ from .version import __version__
 ALL_PLATFORMS = ['win32', 'win32d', 'win64', 'win64d', 'linux64']
 
 ESTIMATE_UNRELIABILITY = 1.25
-WATCH_INTERVAL = 10
+WATCH_INTERVAL = 5
 PRINT_INTERVAL = 1
 
 
@@ -124,9 +124,11 @@ class Jobs:
     # https://eden.esss.com.br/jenkins/job/xmera-fb-xmera-jobs-win64/lastBuild/api/xml
     # and see what is available for the build. Note you can exchange xml by
     # json to switch the output format of API.
-    BUILD_URL = 'https://eden.esss.com.br/jenkins/job/{job_name}/build?delay=0sec'
-    PROGRESS_URL = 'http://eden.esss.com.br/jenkins/job/{job_name}/{job_id}/api/json?tree=id,timestamp,estimatedDuration,building'
-    RESULT_URL = 'http://eden.esss.com.br/jenkins/job/{job_name}/{job_id}/api/json?tree=result'
+    JOB_URL = 'https://eden.esss.com.br/jenkins/job/{job_name}'
+    JOB_WITH_ID_URL = '{job_url}/{job_id}'
+    BUILD_URL = '{job_url}/build?delay=0sec'
+    PROGRESS_URL = JOB_WITH_ID_URL + '/api/json?tree=id,timestamp,estimatedDuration,building'
+    RESULT_URL = JOB_WITH_ID_URL + '/api/json?tree=result'
 
     STATUS_UNKNOWN = 'unknown'
     STATUS_BUILDING = 'building'
@@ -144,6 +146,7 @@ class Jobs:
         self.status = {p: self.STATUS_UNKNOWN for p in self.platforms}
         self.progress = {p: 0. for p in self.platforms}
         self.duration = {p: None for p in self.platforms}
+        self.url = {p: None for p in self.platforms}
 
     @trollius.coroutine
     def build(self, request_args):
@@ -173,13 +176,23 @@ class Jobs:
         return response.status_code in [requests.codes.ok, requests.codes.created]
 
     def process_request_args(self, request_args):
+        return dict(job_url=self.get_job_url(request_args), **request_args)
+
+    def get_job_url(self, request_args):
         mode = request_args['mode']
         if mode is None:
             job_name = '{name}-{branch}-{platform}'
         else:
             job_name = '{name}-{branch}-{mode}-{platform}'
 
-        return dict(job_name=job_name.format(**request_args), **request_args)
+        partial = self.JOB_URL.format(job_name=job_name)
+        return partial.format(**request_args)
+
+    def get_job_with_id_url(self, request_args):
+        return self.JOB_WITH_ID_URL.format(
+            job_url=self.get_job_url(request_args),
+            job_id=request_args['job_id'],
+        )
 
 
 @trollius.coroutine
@@ -226,6 +239,8 @@ def watcher(jobs, platform, request_args):
                 # external restart of job messing with this watcher
                 platform_args = dict(
                     job_id=job_id, platform=platform, **request_args)
+                jobs.url[platform] = jobs.get_job_with_id_url(platform_args)
+
                 waiting = False
                 fixed_timestamp = time.time() - timestamp / 1000
 
@@ -280,14 +295,17 @@ def watcher(jobs, platform, request_args):
 def printer(jobs, branch, mode, platforms):
     progress_width = 50
     total_width = 120
-    count = len(platforms) + 1
     feedback = 0
+    failed = set()
 
     def write_line(line):
         diff = max(total_width - len(line), 0)
         print('{}{}'.format(line, ' ' * diff))
 
-    sys.stdout.write("\n" * count)  # Make sure we have space to draw the bars
+    def count_lines():
+        return len(platforms) + 1 + len(failed)
+
+    sys.stdout.write("\n" * count_lines())  # Make sure we have space to draw the bars
 
     # Use its own done status, to make sure each print all status found
     done = {p: False for p in platforms}
@@ -296,7 +314,7 @@ def printer(jobs, branch, mode, platforms):
 
     while not all(done.itervalues()):
         sys.stdout.write("\u001b[1000D")  # Move left
-        sys.stdout.write("\u001b[{}A".format(count))  # Move up
+        sys.stdout.write("\u001b[{}A".format(count_lines()))  # Move up
 
         if mode:
             write_line("Monitoring jobs in branch \u001b[33m{}\u001b[0m and mode \u001b[33m{}\u001b[0m for platforms \u001b[33m{}\u001b[0m {}".format(branch, mode, ", ".join(platforms), '.' * (feedback + 1)))
@@ -338,8 +356,16 @@ def printer(jobs, branch, mode, platforms):
                 }[status]
                 write_line("{}: [{}{}] {} / {}".format(pretty_platform, "#" * width, " " * (progress_width - width), "\u001b[31m{}\u001b[0m".format(caption), pretty_duration))
                 done[platform] = True
+
+                if status == jobs.STATUS_FAILURE:
+                    failed.add(platform)
             else:
                 assert False, "unknown status"
+
+        # Print URL to failed builds so people can just click on them and
+        # see what happened
+        for platform in sorted(failed, key=lambda i: platforms.index(i)):
+            write_line("Go to {} for failed build in platform \u001b[33m{}\u001b[0m".format(jobs.url[platform], platform))
 
         yield trollius.sleep(PRINT_INTERVAL)
 
