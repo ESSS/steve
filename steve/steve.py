@@ -38,11 +38,15 @@ PRINT_INTERVAL = 1
 
 
 def run(args):
+    configuration = read_config()
+
     parser = argparse.ArgumentParser(
         description='A tool that simplifies running Jenkins jobs from '
                     'command-line')
     parser.add_argument(
-        '-u', '--user', required=True, help='Username')
+        '-u', '--user', default=configuration.user,
+        help='Jenkins username, does not need to be provided if present in'
+             'configuration file')
     parser.add_argument(
         '-b', '--branch', default=None, help='Branch of the CI job to trigger '
                                              '(defaults to current branch)')
@@ -59,7 +63,14 @@ def run(args):
         action='version', version='%(prog)s {}'.format(__version__))
     args = parser.parse_args(args=args)
 
-    password = getpass()
+    user = args.user
+    if not user:
+        parser.error('unable to determine user, add user to ~/.steve or '
+                     'argument -u/--user is required')
+        exit(-1)
+
+    password = (user == configuration.user and configuration.password) or \
+        getpass()
 
     full_repo = subprocess.check_output(
             'git rev-parse --show-toplevel', shell=True).strip()
@@ -95,7 +106,7 @@ def run(args):
         mode=mode,
     )
 
-    jobs = Jobs(user=args.user, password=password, platforms=platforms)
+    jobs = Jobs(user=user, password=password, platforms=platforms)
 
     loop = trollius.get_event_loop()
     # Network I/O bound tasks, unnecessary to be conservative with # of threads
@@ -374,3 +385,34 @@ def read_modes_from_jobs_done(filename):
     with open(filename, 'r') as f:
         yml = yaml.safe_load(f)
         return yml.get('matrix').get('mode', [])
+
+
+def read_config():
+    from ConfigParser import ConfigParser, NoOptionError
+
+    user_cfg = os.path.join(os.path.expanduser('~'), '.steve')
+    configuration = Configuration()
+    if os.path.isfile(user_cfg):
+        config_parser = ConfigParser()
+        config_parser.read(user_cfg)
+        try:
+            configuration.user = config_parser.get('user', 'name')
+        except NoOptionError:
+            pass
+        try:
+            configuration.password = config_parser.get('user', 'password')
+        except NoOptionError:
+            pass
+
+    return configuration
+
+
+class Configuration:
+    """
+    :ivar unicode user: Jenkins username
+    :ivar unicode password: Password or Jenkins API token (https://wiki.jenkins-ci.org/display/JENKINS/Authenticating+scripted+clients)
+    """
+
+    def __init__(self):
+        self.user = None
+        self.password = None

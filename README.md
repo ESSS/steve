@@ -14,6 +14,25 @@ mode, if your project uses that `jobs_done` feature) to guess job name
 in Jenkins and it will start right away to watch progress of current 
 build of job (if none is in progress, it starts a new build).
 
+Configuration file
+------------------
+
+`steve` looks for a configuration file named `.steve` in home of user
+ (`~` on linux, `c:\users\<user_name>` on windows). The configuration
+ file is an INI-like file, with following (all optional) fields 
+ available so far:
+  
+```
+[user]
+name = <Jenkins user name>
+password = <Jenkins password or, safer option, Jenkins API token>
+```
+
+Note that command line `-u/--user` has more priority than user from
+configuration file.
+
+For more information about [Jenkins API token]((https://wiki.jenkins-ci.org/display/JENKINS/Authenticating+scripted+clients).
+
 ## FAQ
 
 *Will `steve` create new builds if one is already in progress?*
