@@ -1,3 +1,8 @@
+0.3.0
+=====
+
+* Can read user and password from user-wide configuration file
+
 0.2.0
 =====
 
