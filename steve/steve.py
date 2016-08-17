@@ -122,11 +122,23 @@ def run(args):
         ))
 
     tasks = [printer_task] + watcher_tasks
-    done, pending = loop.run_until_complete(trollius.wait(tasks))
-    loop.close()
-
-    if any(t.exception() is not None for t in done):
-        exit(1)
+    done = []
+    try:
+        done, pending = loop.run_until_complete(trollius.wait(tasks))
+    except KeyboardInterrupt:
+        try:
+            answer = raw_input("Abort jobs [Y/y] or press any key to exit (keeps jobs running)\n")
+        except KeyboardInterrupt:
+            pass
+        else:
+            if answer.lower() == 'y':
+                aborter_tasks = [loop.create_task(aborter(jobs, platform, request_args))
+                                 for platform in jobs.platforms]
+                done, pending = loop.run_until_complete(trollius.wait(aborter_tasks))
+    finally:
+        loop.close()
+        if any(t.exception() is not None for t in done):
+            exit(1)
 
 
 class Jobs:
@@ -135,9 +147,14 @@ class Jobs:
     # https://eden.esss.com.br/jenkins/job/xmera-fb-xmera-jobs-win64/lastBuild/api/xml
     # and see what is available for the build. Note you can exchange xml by
     # json to switch the output format of API.
-    JOB_URL = 'https://eden.esss.com.br/jenkins/job/{job_name}'
+    JENKINS_URL = 'https://eden.esss.com.br/jenkins/'
+
+    JOB_URL = JENKINS_URL + 'job/{job_name}'
     JOB_WITH_ID_URL = '{job_url}/{job_id}'
     BUILD_URL = '{job_url}/build?delay=0sec'
+    ABORT_URL = JOB_WITH_ID_URL + '/stop'
+    DEQUEUE_URL = JENKINS_URL + 'queue/cancelItem?id={queue_item_id}'
+    QUEUE_ITEMS_URL = JENKINS_URL + 'queue/api/json?tree=items[id,task[name]]'
     PROGRESS_URL = JOB_WITH_ID_URL + '/api/json?tree=id,timestamp,estimatedDuration,building'
     RESULT_URL = JOB_WITH_ID_URL + '/api/json?tree=result'
 
@@ -180,6 +197,27 @@ class Jobs:
         r = yield loop.run_in_executor(None, self.send_request, progress_url)
         raise trollius.Return(r)
 
+    @trollius.coroutine
+    def abort(self, request_args):
+        abort_url = self.ABORT_URL.format(**self.process_request_args(request_args))
+        loop = trollius.get_event_loop()
+        r = yield loop.run_in_executor(None, self.send_request, abort_url)
+        raise trollius.Return(r)
+
+    @trollius.coroutine
+    def dequeue(self, request_args):
+        dequeue_url = self.DEQUEUE_URL.format(**request_args)
+        loop = trollius.get_event_loop()
+        r = yield loop.run_in_executor(None, self.send_request, dequeue_url)
+        raise trollius.Return(r)
+
+    @trollius.coroutine
+    def queue_items(self, request_args):
+        queue_items_url = self.QUEUE_ITEMS_URL.format(**request_args)
+        loop = trollius.get_event_loop()
+        r = yield loop.run_in_executor(None, self.send_request, queue_items_url)
+        raise trollius.Return(r)
+
     def send_request(self, url):
         return requests.post(url, auth=(self.user, self.password))
 
@@ -189,12 +227,16 @@ class Jobs:
     def process_request_args(self, request_args):
         return dict(job_url=self.get_job_url(request_args), **request_args)
 
-    def get_job_url(self, request_args):
+    def get_job_name(self, request_args):
         mode = request_args['mode']
         if mode is None:
             job_name = '{name}-{branch}-{platform}'
         else:
             job_name = '{name}-{branch}-{mode}-{platform}'
+        return job_name.format(**request_args)
+
+    def get_job_url(self, request_args):
+        job_name = self.get_job_name(request_args)
 
         partial = self.JOB_URL.format(job_name=job_name)
         return partial.format(**request_args)
@@ -204,6 +246,61 @@ class Jobs:
             job_url=self.get_job_url(request_args),
             job_id=request_args['job_id'],
         )
+
+
+@trollius.coroutine
+def aborter(jobs, platform, request_args):
+    if jobs.status[platform] not in (Jobs.STATUS_BUILDING, Jobs.STATUS_UNKNOWN):
+        logging.debug("Job [{}] has status {}, so not aborting it", platform, jobs.status[platform])
+        raise trollius.Return()
+
+    platform_args = dict(platform=platform, **request_args)
+
+    if jobs.status[platform] == Jobs.STATUS_UNKNOWN:
+        logging.info("Dequeuing job [{}]...", platform)
+
+        queue_items_ret = yield trollius.From(jobs.queue_items(platform_args))
+        if not jobs.is_request_ok(queue_items_ret):
+            # Error requesting Jenkins queue
+            jobs.status[platform] = jobs.STATUS_CONNECTION_ERROR
+
+        else:
+            queue_ids_content = json.loads(queue_items_ret.content)
+
+            # Search for our job in the Jenkins queue
+            for queue_item in queue_ids_content['items']:
+                job_name = queue_item['task']['name']
+                if job_name == jobs.get_job_name(platform_args):
+                    queue_item_id = queue_item['id']
+                    break
+                else:
+                    # This could happen if the job started between us requesting the queue and parsing the job id.
+                    # It should be a very rare situation. Probably not worth handling.
+                    raise trollius.Return()
+
+            platform_args['queue_item_id'] = queue_item_id
+
+            logging.debug("[{}] request to dequeue".format(platform))
+            dequeue_ret = yield trollius.From(jobs.dequeue(platform_args))
+            logging.debug("[{}] response to dequeue is {}".format(platform, jobs.is_request_ok(dequeue_ret)))
+
+            if not jobs.is_request_ok(dequeue_ret):
+                # error dequeuing
+                jobs.status[platform] = jobs.STATUS_CONNECTION_ERROR
+
+    else:
+        logging.info("Aborting job [{}]...", platform)
+
+        platform_args['job_id'] = 'lastBuild'
+
+        logging.debug("[{}] request to abort".format(platform))
+        abort_ret = yield trollius.From(jobs.abort(platform_args))
+        logging.debug("[{}] response to abort is {}".format(platform, jobs.is_request_ok(abort_ret)))
+
+        if not jobs.is_request_ok(abort_ret):
+            jobs.status[platform] = jobs.STATUS_CONNECTION_ERROR
+
+        print("Go to {} for aborted build in platform \u001b[33m{}\u001b[0m".format(jobs.url[platform], platform))
 
 
 @trollius.coroutine
