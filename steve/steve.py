@@ -122,6 +122,7 @@ def run(args):
         ))
 
     tasks = [printer_task] + watcher_tasks
+    done = []
     try:
         done, pending = loop.run_until_complete(trollius.wait(tasks))
     except KeyboardInterrupt:
@@ -133,9 +134,8 @@ def run(args):
             if answer.lower() == 'y':
                 aborter_tasks = [loop.create_task(aborter(jobs, platform, request_args))
                                  for platform in jobs.platforms]
-                loop.run_until_complete(trollius.wait(aborter_tasks))
-                loop.close()
-    else:
+                done, pending = loop.run_until_complete(trollius.wait(aborter_tasks))
+    finally:
         loop.close()
         if any(t.exception() is not None for t in done):
             exit(1)
