@@ -1,3 +1,10 @@
+0.5.1
+=====
+
+* Use of arbitrary terminal width caused undesired new lines to be printed
+* Watcher coroutine was bugged when a request failed
+* Updated readme
+
 0.5.0
 =====
 
