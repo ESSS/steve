@@ -44,17 +44,30 @@ monitoring progress of a same job.
 *Do I have to always use current branch and platform?*
 
 No. Use `-b/--branch BRANCH` to run other branch and 
-`--p/--platform PLATFORMS` for other platforms. Notice that it is
+`-m/--matrix platform:PLATFORMS` for other platforms. Notice that it is
 possible to monitor many platforms at once, by using space separated
 values (accepted values are the usual ones: `win64`, `win32`, 
-`linux64`, `win64d`, `win32d`)
+`linux64`, `win64d`, `win32d`, `win64g`, `win32g`)
 
 ```bash
-steve -u foo -p win64 linux64
+steve -u foo -m platform:win64,linux64
 ```
 
 *Who is the most relevant mode? Can I change it too?*
 
-Most relevant mode is the first one in list of modes available in
-`.jobs_done.yaml` file (note that if no mode is found `steve` should
-work as well). To change mode use `-m/--mode MODE`.
+Most relevant mode is the first value of each key in `matrix` of
+`.jobs_done.yaml` file, except for platform that defaults to user's current
+platform. 
+
+To select other configuration `-m/--matrix MATRIX`. Matrix option must be
+a series of keys separated by semicolons (`;`), where each key is followed by a
+colon (`:`) and a series of values separated by comma (`,`).
+ 
+To run a job both in Python 2.7 and 3.5:
+
+```bash
+steve -u foo -m python:27,35
+```
+
+Note all other options absent in custom matrix are set to most relevant values,
+as explained in *Who is the most relevant mode? Can I change it too?*.

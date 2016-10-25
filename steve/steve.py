@@ -103,6 +103,7 @@ def run(user, branch, matrix, configuration, debug=False):
 
     tasks = [printer_task] + watcher_tasks
     done = []
+    error_code = 0
     try:
         done, pending = loop.run_until_complete(trollius.wait(tasks))
     except KeyboardInterrupt:
@@ -118,9 +119,10 @@ def run(user, branch, matrix, configuration, debug=False):
     finally:
         loop.close()
         if any(t.exception() is not None for t in done):
-            return 1
+            error_code = 1
 
-    return 0
+    sys.stdout.write("\n")
+    return error_code
 
 
 class BuildJobs:
@@ -451,11 +453,12 @@ def watcher(job):
                 job.status = STATUS_SUCCESS
             else:
                 assert False, "Could not parse status {}".format(status)
-    except trollius.coroutines.ReturnException:
-        pass
-    except:
-        job.status = STATUS_INTERNAL_ERROR
-        logging.exception("Internal error while trying to watch job progress")
+    except Exception as e:
+        if not isinstance(e, trollius.coroutines.Return):
+            job.status = STATUS_INTERNAL_ERROR
+            logging.exception("Internal error while trying to watch job progress")
+        else:
+            raise e
     finally:
         job.done = True
 
@@ -463,7 +466,7 @@ def watcher(job):
 @trollius.coroutine
 def printer(jobs):
     progress_width = 50
-    total_width = 200
+    total_width = get_terminal_width()
     feedback = 0
     failed = set()
 
@@ -477,7 +480,7 @@ def printer(jobs):
         cancelled = 0
         if any(j.cancelled for j in jobs.instances):
             cancelled = 1
-        return len(jobs.configurations) + 1 + len(failed) + cancelled
+        return len(jobs.instances) + 1 + len(failed) + cancelled
 
     sys.stdout.write("\n" * count_lines())  # Make sure we have space to draw the bars
 
@@ -629,6 +632,12 @@ def read_config():
             pass
 
     return configuration
+
+
+def get_terminal_width():
+    width = subprocess.check_output('tput cols', shell=True)
+    width = int(width.strip())
+    return width - 1
 
 
 class Configuration:
