@@ -190,7 +190,8 @@ class BuildJob(Job):
     JOB_WITH_ID_URL = '{job_url}/{job_id}'
     BUILD_URL = '{job_url}/build?delay=0sec'
     ABORT_URL = JOB_WITH_ID_URL + '/stop'
-    PROGRESS_URL = JOB_WITH_ID_URL + '/api/json?tree=id,timestamp,estimatedDuration,building'
+    BUILD_NUMBER_URL = JOB_WITH_ID_URL + '/buildNumber'
+    PROGRESS_URL = JOB_WITH_ID_URL + '/api/json?tree=id,timestamp,estimatedDuration,building,result'
     RESULT_URL = JOB_WITH_ID_URL + '/api/json?tree=result'
 
     def __init__(self, user, password, configuration, branch, name):
@@ -206,7 +207,7 @@ class BuildJob(Job):
         self.duration = None
         # While it doesn't know which job exactly it is going to watch, look
         # for most current build
-        self.job_id = 'lastBuild'
+        self.job_id = '0'
 
     @property
     def platform(self):
@@ -216,11 +217,16 @@ class BuildJob(Job):
     def url(self):
         return self.get_job_with_id_url()
 
-    def is_job_id_initialized(self):
-        return self.job_id == 'lastBuild'
-
     def update_job_id(self, job_id):
         self.job_id = job_id
+
+    @trollius.coroutine
+    def get_last_build_id(self):
+        job_url = self.get_job_url()
+        build_number_url = self.BUILD_NUMBER_URL.format(job_url=job_url, job_id='lastBuild')
+        loop = trollius.get_event_loop()
+        r = yield loop.run_in_executor(None, self.send_request, build_number_url, self.parameters)
+        raise trollius.Return(r)
 
     @trollius.coroutine
     def build(self):
@@ -368,6 +374,7 @@ def watcher(job):
         # 1. monitor progress until stops building
         waiting = True
         building = False
+        result = 'null'
         while not job.cancelled and (waiting or building):
             logging.debug("[{}] request to watch build".format(short_name))
             monitor_ret = yield trollius.From(job.monitor())
@@ -378,11 +385,10 @@ def watcher(job):
 
             if is_request_ok(monitor_ret):
                 progress_content = json.loads(monitor_ret.content)
-                if not job.is_job_id_initialized():
-                    job.update_job_id(job_id=progress_content['id'])
                 timestamp = progress_content['timestamp']  # in milliseconds
                 estimated = progress_content['estimatedDuration']
                 building = progress_content['building']
+                result = progress_content['result']
                 logging.debug("[{}] watch response content: {}, {}, {}".format(
                     short_name, building, timestamp, estimated))
             elif monitor_ret.status_code == requests.codes.not_found:
@@ -394,7 +400,19 @@ def watcher(job):
                 job.status = STATUS_CONNECTION_ERROR
                 raise trollius.Return()
 
-            if waiting and not building:
+            if waiting and not building and result == 'null':
+                # First we need to predict next build number
+                logging.debug("[{}] get last build id".format(short_name))
+                last_build_id_ret = yield trollius.From(job.get_last_build_id())
+                if is_request_ok(last_build_id_ret):
+                    last_build_id = last_build_id_ret.text.strip()
+                    logging.debug("[{}] previous build id is {}".format(short_name, last_build_id))
+                    next_build_id = '{}'.format(int(last_build_id) + 1)
+                    logging.debug("[{}] next build id is {}".format(short_name, next_build_id))
+                    job.update_job_id(next_build_id)
+                else:
+                    logging.debug("[{}] get last build id failed. Maybe first build?".format(short_name))
+
                 # If not building yet, request to start a build
                 logging.debug("[{}] request to build".format(short_name))
                 build_ret = yield trollius.From(job.build())
