@@ -69,5 +69,14 @@ To run a job both in Python 2.7 and 3.5:
 steve -u foo -m python:27,35
 ```
 
+*What about parametrized builds?*
+
+You can pass any number of parameters to a build (provided the job declares
+parameters):
+
+```bash
+steve -u foo -p param1:foo param2:bar
+```
+
 Note all other options absent in custom matrix are set to most relevant values,
 as explained in *Who is the most relevant mode? Can I change it too?*.

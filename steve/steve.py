@@ -16,14 +16,14 @@ import trollius
 import yaml
 from concurrent.futures.thread import ThreadPoolExecutor
 
-ALL_PLATFORMS = ['win32', 'win32d', 'win32g', 'win64', 'win64d', 'win64g', 'linux64']
+ALL_PLATFORMS = ['win32', 'win32d', 'win32g', 'win64', 'win64d', 'win64g', 'linux64', 'none']
 
 ESTIMATE_UNRELIABILITY = 1.25
 WATCH_INTERVAL = 5
 PRINT_INTERVAL = 1
 
 
-def run(user, branch, matrix, configuration, debug=False):
+def run(user, branch, matrix, configuration, debug=False, parameters=None):
     # TODO: stuff that can be implemented/improved
     # * configure polling interval
     # * attempt few times before giving up on requests that fail
@@ -88,8 +88,11 @@ def run(user, branch, matrix, configuration, debug=False):
         raise ValueError('Invalid platforms: {}'.format(
             ','.join(invalid_platforms)))
 
+    if parameters:
+        parameters = parse_parameters_from_args(parameters)
     jobs = BuildJobs(
-        user=user, password=password, configurations=configurations, branch=branch, name=repo)
+        user=user, password=password, configurations=configurations, branch=branch, name=repo,
+        parameters=parameters)
 
     loop = trollius.get_event_loop()
     # Network I/O bound tasks, unnecessary to be conservative with # of threads
@@ -127,13 +130,14 @@ def run(user, branch, matrix, configuration, debug=False):
 
 class BuildJobs:
 
-    def __init__(self, user, password, configurations, branch, name):
+    def __init__(self, user, password, configurations, branch, name, parameters):
         self.user = user
         self.password = password
         self.configurations = configurations
         self.branch = branch
         self.name = name
         self.platforms = get_platforms_from_comfigurations(configurations)
+        self.parameters = parameters
 
         self.instances = [
             BuildJob(
@@ -142,6 +146,7 @@ class BuildJobs:
                 configuration=configuration,
                 branch=branch,
                 name=name,
+                parameters=parameters,
             )
             for configuration in self.configurations]
 
@@ -180,8 +185,8 @@ class Job:
         self.user = user
         self.password = password
 
-    def send_request(self, url):
-        return requests.post(url, auth=(self.user, self.password))
+    def send_request(self, url, parameters=None):
+        return requests.post(url, auth=(self.user, self.password), data=parameters)
 
 
 class BuildJob(Job):
@@ -189,16 +194,18 @@ class BuildJob(Job):
     JOB_URL = JENKINS_URL + 'job/{job_name}'
     JOB_WITH_ID_URL = '{job_url}/{job_id}'
     BUILD_URL = '{job_url}/build?delay=0sec'
+    BUILD_WITH_PARAM_URL = '{job_url}/buildWithParameters?delay=0sec'
     ABORT_URL = JOB_WITH_ID_URL + '/stop'
     BUILD_NUMBER_URL = JOB_WITH_ID_URL + '/buildNumber'
     PROGRESS_URL = JOB_WITH_ID_URL + '/api/json?tree=id,timestamp,estimatedDuration,building,result'
     RESULT_URL = JOB_WITH_ID_URL + '/api/json?tree=result'
 
-    def __init__(self, user, password, configuration, branch, name):
+    def __init__(self, user, password, configuration, branch, name, parameters):
         Job.__init__(self, user, password)
         self.name = name
         self.branch = branch
         self.configuration = configuration
+        self.parameters = parameters
 
         self.done = False
         self.cancelled = False
@@ -231,9 +238,10 @@ class BuildJob(Job):
     @trollius.coroutine
     def build(self):
         job_url = self.get_job_url()
-        build_url = self.BUILD_URL.format(job_url=job_url)
+        build_url = self.BUILD_WITH_PARAM_URL if self.parameters else self.BUILD_URL
+        build_url = build_url.format(job_url=job_url)
         loop = trollius.get_event_loop()
-        r = yield loop.run_in_executor(None, self.send_request, build_url)
+        r = yield loop.run_in_executor(None, self.send_request, build_url, self.parameters)
         raise trollius.Return(r)
 
     @trollius.coroutine
@@ -605,6 +613,12 @@ def parse_matrix_from_args(matrix_arg, full_matrix):
         matrix[key] = values.split(',')
 
     return matrix
+
+
+def parse_parameters_from_args(parameters):
+    parameters = [p.split(':') for p in parameters]
+    parameters = {p[0]: p[1] for p in parameters}
+    return parameters
 
 
 def fill_missing_in_matrix(matrix, default_configuration):

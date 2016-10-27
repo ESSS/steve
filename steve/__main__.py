@@ -24,6 +24,9 @@ def main(args=None):
         '-b', '--branch', default=None, help='Branch of the CI job to trigger (defaults to '
                                              'current branch)')
     parser.add_argument(
+        '-p', '--parameter', nargs='+', default=None,
+        help='Build parameters. Multiple values can be passed (e.g. "-p name:value name2:value2")')
+    parser.add_argument(
         '-m', '--matrix', default=None, help='Desired jobs_done matrix configuration. Must be in'
                                              'a dict-like format (for example: '
                                              'python:35; platform:win64,linux64). This '
@@ -47,6 +50,7 @@ def main(args=None):
         matrix=args.matrix,
         configuration=configuration,
         debug=args.debug,
+        parameters=args.parameter,
     )
 
 if __name__ == '__main__':
