@@ -52,7 +52,7 @@ def run(user, branch, matrix, configuration, debug=False, parameters=None):
         if sys.platform.startswith('win'):
             log_file = os.path.join(os.path.expanduser('~'), 'steve.log')
         else:
-            log_file = '/var/log/steve.log'
+            log_file = os.path.join(os.path.expanduser('~'), '.steve.log')
         logger.addHandler(logging.FileHandler(log_file))
 
     password = (user == configuration.user and configuration.password) or \
