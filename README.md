@@ -60,13 +60,13 @@ Most relevant mode is the first value of each key in `matrix` of
 platform. 
 
 To select other configuration `-m/--matrix MATRIX`. Matrix option must be
-a series of keys separated by semicolons (`;`), where each key is followed by a
+a series of keys separated by whitespaces (` `), where each key is followed by a
 colon (`:`) and a series of values separated by comma (`,`).
  
-To run a job both in Python 2.7 and 3.5:
+To run a job both in Python 2.7 and 3.5 on linux64 e win64:
 
 ```bash
-steve -u foo -m python:27,35
+steve -u foo -m python:27,35 platform:win64,linux64
 ```
 
 *What about parametrized builds?*

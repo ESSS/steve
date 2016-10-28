@@ -27,12 +27,11 @@ def main(args=None):
         '-p', '--parameter', nargs='+', default=None,
         help='Build parameters. Multiple values can be passed (e.g. "-p name:value name2:value2")')
     parser.add_argument(
-        '-m', '--matrix', default=None, help='Desired jobs_done matrix configuration. Must be in'
-                                             'a dict-like format (for example: '
-                                             'python:35; platform:win64,linux64). This '
-                                             'configuration prevails over default or configuration'
-                                             'file values and it is used to define how many jobs'
-                                             'are going to be executed.')
+        '-m', '--matrix', nargs='+', default=None,
+        help='Desired jobs_done matrix configuration. Must be in a dict-like format with multiple '
+             'values (e.g. "python:35" "platform:win64,linux64"). This configuration '
+             'prevails over default or configuration file values and it is used to define how many '
+             'jobs are going to be executed.')
     parser.add_argument('--debug', action='store_true', help='Enables debugging')
     parser.add_argument(
         '-v', '--version',

@@ -597,7 +597,7 @@ def iter_jobs_combinations(matrix):
 
 def parse_matrix_from_args(matrix_arg, full_matrix):
     matrix = {}
-    for option in matrix_arg.split(';'):
+    for option in matrix_arg:
         key, values = option.split(':')
         key = key.strip()
         values = values.strip()
