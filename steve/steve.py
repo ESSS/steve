@@ -16,7 +16,15 @@ import trollius
 import yaml
 from concurrent.futures.thread import ThreadPoolExecutor
 
-ALL_PLATFORMS = ['win32', 'win32d', 'win32g', 'win64', 'win64d', 'win64g', 'linux64', 'none']
+ALL_PLATFORMS = ['win32',
+                 'win32d',
+                 'win32g',
+                 'win64',
+                 'win64d',
+                 'win64g',
+                 'linux64',
+                 'none',
+                 'promote']
 
 ESTIMATE_UNRELIABILITY = 1.25
 WATCH_INTERVAL = 5
