@@ -1,4 +1,4 @@
 from __future__ import absolute_import, division, print_function, \
     unicode_literals
 
-__version__ = b'0.5.1'
+__version__ = b'0.6.0'
