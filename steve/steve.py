@@ -238,7 +238,7 @@ class BuildJob(Job):
     @trollius.coroutine
     def get_last_build_id(self):
         job_url = self.get_job_url()
-        build_number_url = self.BUILD_NUMBER_URL.format(job_url=job_url, job_id='lastBuild')
+        build_number_url = self.BUILD_NUMBER_URL.format(job_url=job_url, job_id='lastCompletedBuild')
         loop = trollius.get_event_loop()
         r = yield loop.run_in_executor(None, self.send_request, build_number_url, self.parameters)
         raise trollius.Return(r)
