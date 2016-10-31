@@ -222,7 +222,7 @@ class BuildJob(Job):
         self.duration = None
         # While it doesn't know which job exactly it is going to watch, look
         # for most current build
-        self.job_id = '0'
+        self.job_id = '1'
 
     @property
     def platform(self):
