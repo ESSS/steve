@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from getpass import getpass
 
 import requests
@@ -16,15 +17,17 @@ import trollius
 import yaml
 from concurrent.futures.thread import ThreadPoolExecutor
 
-ALL_PLATFORMS = ['win32',
-                 'win32d',
-                 'win32g',
-                 'win64',
-                 'win64d',
-                 'win64g',
-                 'linux64',
-                 'none',
-                 'promote']
+ALL_PLATFORMS = [
+    'win32',
+    'win32d',
+    'win32g',
+    'win64',
+    'win64d',
+    'win64g',
+    'linux64',
+    'none',  # special platform used by provisions in fett
+    'promote',  # special platform used to promote conda recipes to official channel
+]
 
 ESTIMATE_UNRELIABILITY = 1.25
 WATCH_INTERVAL = 5
@@ -178,26 +181,70 @@ STATUS_INTERNAL_ERROR = 'internal_error'
 JENKINS_URL = 'https://eden.esss.com.br/jenkins/'
 
 
-def is_request_ok(response):
-    return response.status_code in [requests.codes.ok, requests.codes.created]
-
-
-def is_request_not_found(response):
-    return response.status_code == requests.codes.not_found
+OK_RESPONSES = (requests.codes.ok, requests.codes.created)
 
 
 class Job:
+    """
+    Base class for Jenkins jobs objects.
+    """
+
     __metaclass__ = abc.ABCMeta
 
     def __init__(self, user, password):
         self.user = user
         self.password = password
 
+        self.status = STATUS_UNKNOWN
+        self.done = False
+        self.cancelled = False
+
     def send_request(self, url, parameters=None):
         return requests.post(url, auth=(self.user, self.password), data=parameters)
 
+    @abc.abstractmethod
+    def get_job_short_name(self):
+        """
+        :rtype: str
+        :return: Name identifying job.
+        """
+
+    @contextmanager
+    def _safe_request(self):
+        raised = False
+        try:
+            yield
+        except Exception:
+            raised = True
+            raise
+        finally:
+            if raised:
+                self.done = True
+
+    def _check_cancelled(self, name):
+        if self.cancelled:
+            short_name = self.get_job_short_name()
+            logging.debug("[{}] cancelled during {} request".format(short_name, name))
+            self.status = STATUS_ABORT
+            raise trollius.CancelledError()
+
+    def _check_response(self, response, name, accepted=OK_RESPONSES):
+        ok = response.status_code in accepted
+        short_name = self.get_job_short_name()
+        logging.debug("[{}] response to {} is {} ({})".format(
+            short_name, name, ok, response.status_code))
+
+        if not ok:
+            self.status = STATUS_CONNECTION_ERROR
+            raise ConnectionError(response.status_code)
+
+        return response.status_code
+
 
 class BuildJob(Job):
+    """
+    Object that controls how to create a build in Jenkins and monitor its progress.
+    """
 
     JOB_URL = JENKINS_URL + 'job/{job_name}'
     JOB_WITH_ID_URL = '{job_url}/{job_id}'
@@ -206,7 +253,6 @@ class BuildJob(Job):
     ABORT_URL = JOB_WITH_ID_URL + '/stop'
     BUILD_NUMBER_URL = JOB_WITH_ID_URL + '/buildNumber'
     PROGRESS_URL = JOB_WITH_ID_URL + '/api/json?tree=id,timestamp,estimatedDuration,building,result'
-    RESULT_URL = JOB_WITH_ID_URL + '/api/json?tree=result'
 
     def __init__(self, user, password, configuration, branch, name, parameters):
         Job.__init__(self, user, password)
@@ -214,139 +260,303 @@ class BuildJob(Job):
         self.branch = branch
         self.configuration = configuration
         self.parameters = parameters
-
-        self.done = False
-        self.cancelled = False
-        self.status = STATUS_UNKNOWN
+        self.building = False
         self.progress = 0.
         self.duration = None
-        # While it doesn't know which job exactly it is going to watch, look
-        # for most current build
-        self.job_id = '1'
+        # It doesn't know which job exactly it is going to watch first, it has to call
+        # `seek` first.
+        self.job_id = None
 
     @property
     def platform(self):
+        """
+        :rtype: str
+        :return: Platform where this build is running.
+        """
         return self.configuration['platform']
 
     @property
     def url(self):
+        """
+        :rtype: str
+        :return: Base URL for the build of this job, including its id.
+        """
         return self.get_job_with_id_url()
 
-    def update_job_id(self, job_id):
-        self.job_id = job_id
-
-    @trollius.coroutine
-    def get_last_build_id(self):
-        job_url = self.get_job_url()
-        build_number_url = self.BUILD_NUMBER_URL.format(job_url=job_url, job_id='lastCompletedBuild')
-        loop = trollius.get_event_loop()
-        r = yield loop.run_in_executor(None, self.send_request, build_number_url, self.parameters)
-        raise trollius.Return(r)
-
-    @trollius.coroutine
-    def build(self):
-        job_url = self.get_job_url()
-        build_url = self.BUILD_WITH_PARAM_URL if self.parameters else self.BUILD_URL
-        build_url = build_url.format(job_url=job_url)
-        loop = trollius.get_event_loop()
-        r = yield loop.run_in_executor(None, self.send_request, build_url, self.parameters)
-        raise trollius.Return(r)
-
-    @trollius.coroutine
-    def monitor(self):
-        job_url = self.get_job_url()
-        progress_url = self.PROGRESS_URL.format(job_id=self.job_id, job_url=job_url)
-        loop = trollius.get_event_loop()
-        r = yield loop.run_in_executor(None, self.send_request, progress_url)
-        raise trollius.Return(r)
-
-    @trollius.coroutine
-    def result(self):
-        job_url = self.get_job_url()
-        progress_url = self.RESULT_URL.format(job_id=self.job_id, job_url=job_url)
-        loop = trollius.get_event_loop()
-        r = yield loop.run_in_executor(None, self.send_request, progress_url)
-        raise trollius.Return(r)
-
-    @trollius.coroutine
-    def abort(self):
-        job_url = self.get_job_url()
-        abort_url = self.ABORT_URL.format(job_id=self.job_id, job_url=job_url)
-        loop = trollius.get_event_loop()
-        r = yield loop.run_in_executor(None, self.send_request, abort_url)
-        raise trollius.Return(r)
-
     def get_job_name(self):
-        # See `jobs_done10` repo (https://eden.esss.com.br/stash/projects/ESSS/repos/jobs_done10/)
-        # for more details about how branchs are named.
-        #
-        # The gist of it is:
-        # * first is project name
-        # * next comes the branch name
-        # * after them, come all matrix values, sorted alphabetically by their matrix keys
+        """
+        See `jobs_done10` repo (https://eden.esss.com.br/stash/projects/ESSS/repos/jobs_done10/)
+        for more details about how branches are named.
+
+        The gist of it is:
+        * first is project name
+        * next comes the branch name
+        * after them, come all matrix values, sorted alphabetically by their matrix keys
+
+        :rtype: str
+        :return: Full job name, in format according to `jobs_done10`.
+        """
         job_name = '{name}-{branch}-'.format(name=self.name, branch=self.branch)
         job_name += self.get_job_short_name()
         return job_name
 
     def get_job_short_name(self):
+        """
+        :rtype: str
+        :return: Job name minus repo and branch.
+        """
         values = (self.configuration[key] for key in sorted(self.configuration.keys()))
         return '-'.join(values)
 
     def get_job_url(self):
+        """
+        :rtype: str
+        :return: Base URL for the build of this job.
+        """
         job_name = self.get_job_name()
         return self.JOB_URL.format(job_name=job_name)
 
     def get_job_with_id_url(self):
+        """
+        :rtype: str
+        :return: Base URL for the build of this job, including its id.
+        """
+        self._check_job_id_is_known()
         return self.JOB_WITH_ID_URL.format(
             job_url=self.get_job_url(),
             job_id=self.job_id,
         )
 
+    @trollius.coroutine
+    def seek(self):
+        """
+        Seeks the build number of job.
+
+        If a build is already in progress, it reuses its id to follow its progress instead of
+        creating a new build.
+
+        When there isn't any build in progress (or even any progress yet), it uses next available
+        id.
+        """
+        with self._safe_request():
+            assert self.job_id is None, "Already determined newest build"
+
+            self._check_cancelled(name='seek')
+            job_url = self.get_job_url()
+            newest_url = '{job_url}/api/json?tree=builds[id,building,result]{{0,1}}'.format(
+                job_url=job_url)
+            loop = trollius.get_event_loop()
+            response = yield loop.run_in_executor(None, self.send_request, newest_url)
+            self._check_cancelled(name='seek')
+            self._check_response(response, name='seek')
+
+            builds_content = json.loads(response.content)['builds']
+            if not builds_content:
+                # It is first build
+                self.job_id = '1'
+            else:
+                newest_content = builds_content[0]
+                building = self.building = newest_content['building']
+                if building:
+                    self.job_id = newest_content['id']
+                else:
+                    # Queued builds don't seem to be included in this list so it seems safe to
+                    # assume any non-building build (not mattering the reason) is already done and
+                    # our build is going to be the next.
+                    self.job_id = unicode(int(newest_content['id']) + 1)
+
+    @trollius.coroutine
+    def build(self):
+        """
+        Starts the build.
+
+        IMPORTANT: `seek` must have been called once before.
+        """
+        with self._safe_request():
+            self._check_job_id_is_known()
+
+            self._check_cancelled(name='build')
+            short_name = self.get_job_short_name()
+            logging.debug("[{}] request to build".format(short_name))
+
+            job_url = self.get_job_url()
+            build_url = self.BUILD_WITH_PARAM_URL if self.parameters else self.BUILD_URL
+            build_url = build_url.format(job_url=job_url)
+            loop = trollius.get_event_loop()
+            response = yield loop.run_in_executor(None, self.send_request, build_url, self.parameters)
+            self._check_cancelled(name='build')
+            self._check_response(response, name='build')
+
+    @trollius.coroutine
+    def monitor(self):
+        """
+        Monitor the progress of build in progress.
+
+        It updates the status, progress and duration according to contents of requests made to
+        Jenkins.
+
+        IMPORTANT: `seek` must have been called once before.
+        """
+        with self._safe_request():
+            self._check_job_id_is_known()
+
+            self._check_cancelled(name='monitor')
+            short_name = self.get_job_short_name()
+            logging.debug("[{}] request to monitor build".format(short_name))
+
+            job_url = self.get_job_url()
+            progress_url = self.PROGRESS_URL.format(job_id=self.job_id, job_url=job_url)
+            loop = trollius.get_event_loop()
+            response = yield loop.run_in_executor(None, self.send_request, progress_url)
+            self._check_cancelled(name='monitor')
+            status_code = self._check_response(
+                response, name='monitor', accepted=list(OK_RESPONSES) + [requests.codes.not_found])
+
+            if status_code == requests.codes.not_found:
+                # If not found, it may mean it is first time there is a build
+                # for this job.
+                logging.debug("[{}] couldn't monitor build".format(short_name))
+            else:
+                progress_content = json.loads(response.content)
+                timestamp = progress_content['timestamp']  # in milliseconds
+                estimated = progress_content['estimatedDuration']
+                self.building = progress_content['building']
+                result = progress_content['result']
+                logging.debug(
+                    "[{}] monitored build contents: "
+                    "building={}, timestamp={}, estimated={}, result={}".format(
+                        short_name, self.building, timestamp, estimated, result))
+
+                fixed_timestamp = time.time() - timestamp / 1000
+
+                # Just save first duration, as printer is a lot more frequent
+                # than watchers, so it is better to increment duration there for
+                # better feedback
+                if self.duration is None:
+                    self.duration = fixed_timestamp
+
+                if estimated > 0:
+                    self.status = STATUS_BUILDING
+                    # Jenkins estimate not very reliable, be conservative
+                    fixed_estimated = ESTIMATE_UNRELIABILITY * estimated / 1000.
+                    progress = fixed_timestamp / fixed_estimated
+                    # Even with some unreliability factor, progress can
+                    # exceed 100%
+                    self.progress = min(progress, 0.99)
+                else:
+                    self.status = STATUS_UNKNOWN
+
+                if result is not None:
+                    self._update_result_status(result=result)
+
+    @trollius.coroutine
+    def abort(self):
+        """
+        Abort build in progress.
+
+        IMPORTANT: `seek` must have been called once before.
+        """
+        with self._safe_request():
+            self._check_job_id_is_known()
+
+            short_name = self.get_job_short_name()
+            logging.debug("[{}] request to abort job".format(short_name))
+
+            job_url = self.get_job_url()
+            abort_url = self.ABORT_URL.format(job_id=self.job_id, job_url=job_url)
+            loop = trollius.get_event_loop()
+            response = yield loop.run_in_executor(None, self.send_request, abort_url)
+            self._check_response(response, name='abort')
+
+    def _check_job_id_is_known(self):
+        if self.job_id is None:
+            raise RuntimeError("Remember to first call `seek` to discover job id")
+
+    def _update_result_status(self, result):
+        if result == 'FAILURE':
+            self.status = STATUS_FAILURE
+        elif result == 'ABORTED':
+            self.status = STATUS_ABORT
+        elif result == 'SUCCESS':
+            self.status = STATUS_SUCCESS
+        else:
+            assert False, "Could not parse status {}".format(result)
+
+        self.done = True
+
 
 class QueueJob(Job):
+    """
+    Object that controls how to obtain jobs in Jenkins queue and how to order them to be dequeued.
+    """
 
     DEQUEUE_URL = JENKINS_URL + 'queue/cancelItem?id={queue_item_id}'
     QUEUE_ITEMS_URL = JENKINS_URL + 'queue/api/json?tree=items[id,task[name]]'
 
     @trollius.coroutine
     def dequeue(self, queue_item_id):
+        """
+        Requests a queued build to be dequeued.
+
+        :param unicode queue_item_id: Id of a queued build in Jenkins.
+        """
+        short_name = self.get_job_short_name()
+        logging.debug("[{}] Request to dequeue job with queue id {}".format(
+            short_name, queue_item_id))
         dequeue_url = self.DEQUEUE_URL.format(queue_item_id=queue_item_id)
         loop = trollius.get_event_loop()
-        r = yield loop.run_in_executor(None, self.send_request, dequeue_url)
-        raise trollius.Return(r)
+        response = yield loop.run_in_executor(None, self.send_request, dequeue_url)
+        # Dequeue request has the terrible habit of returning 404 error code even when it
+        # successfully pops build from queue...
+        self._check_response(
+            response, name=short_name, accepted=list(OK_RESPONSES) + [requests.codes.not_found])
 
     @trollius.coroutine
     def queue_items(self):
+        """
+        :rtype: list[dict]
+        :return: List of queued builds in Jenkins.
+        """
+        short_name = self.get_job_short_name()
+        logging.debug("[{}] Listing queued jobs".format(short_name))
+
         queue_items_url = self.QUEUE_ITEMS_URL
         loop = trollius.get_event_loop()
-        r = yield loop.run_in_executor(None, self.send_request, queue_items_url)
-        raise trollius.Return(r)
+        response = yield loop.run_in_executor(None, self.send_request, queue_items_url)
+        self._check_response(response, name=short_name)
+
+        queue_ids_content = json.loads(response.content)
+        raise trollius.Return(queue_ids_content['items'])
+
+    def get_job_short_name(self):
+        return 'queue'
 
 
 @trollius.coroutine
 def aborter(job):
+    """
+    Aborts a job that is currently building. If it hasn't started yet, it is just dequeued,
+    otherwise it is aborted.
+
+    :param BuildJob job: A job's build.
+    """
     short_name = job.get_job_short_name()
     if job.status not in (STATUS_BUILDING, STATUS_UNKNOWN):
-        logging.debug("BuildJob [{}] has status {}, so not aborting it", short_name, job.status)
+        logging.debug("[{}] Status {}, not really building or queued, no need to abort".format(
+            short_name, job.status))
         raise trollius.Return()
 
     # To make sure it stops watching and retrying to build
     job.cancelled = True
 
-    if job.status == STATUS_UNKNOWN:
-        queue_job = QueueJob(job.user, job.password)
-        logging.info("Dequeuing job [{}]...", short_name)
+    try:
+        if job.status == STATUS_UNKNOWN:
+            queue_job = QueueJob(job.user, job.password)
 
-        queue_items_ret = yield trollius.From(queue_job.queue_items())
-        if not is_request_ok(queue_items_ret):
-            # Error requesting Jenkins queue
-            job.status = STATUS_CONNECTION_ERROR
-
-        else:
-            queue_ids_content = json.loads(queue_items_ret.content)
+            queued = yield trollius.From(queue_job.queue_items())
 
             # Search for our job in the Jenkins queue
-            for queue_item in queue_ids_content['items']:
+            for queue_item in queued:
                 job_name = queue_item['task']['name']
                 if job_name == job.get_job_name():
                     queue_item_id = queue_item['id']
@@ -357,144 +567,48 @@ def aborter(job):
                 # handling.
                 raise trollius.Return()
 
-            logging.debug("[{}] request to dequeue".format(short_name))
-            dequeue_ret = yield trollius.From(queue_job.dequeue(queue_item_id))
-            # Dequeue request has the terrible habit of returning 404 error code even when it
-            # successfully pops build from queue...
-            dequeue_ok = is_request_ok(dequeue_ret) or is_request_not_found(dequeue_ret)
-            logging.debug("[{}] response to dequeue is {}".format(short_name, dequeue_ok))
-
-            if not dequeue_ok:
-                # error dequeuing
-                job.status = STATUS_CONNECTION_ERROR
-
-    else:
-        logging.info("Aborting job [{}]...", short_name)
-
-        logging.debug("[{}] request to abort".format(short_name))
-        abort_ret = yield trollius.From(job.abort())
-        logging.debug("[{}] response to abort is {}".format(short_name, is_request_ok(abort_ret)))
-
-        if not is_request_ok(abort_ret):
-            job.status = STATUS_CONNECTION_ERROR
-
-        print("Go to {} for aborted build in platform \u001b[33m{}\u001b[0m".format(
-            job.url, short_name))
+            yield trollius.From(queue_job.dequeue(queue_item_id))
+        else:
+            yield trollius.From(job.abort())
+            print("Go to {} for aborted build in configuration \u001b[33m{}\u001b[0m".format(
+                job.url, short_name))
+    except ConnectionError:
+        job.status = STATUS_CONNECTION_ERROR
 
 
 @trollius.coroutine
 def watcher(job):
+    """
+    Monitors the progress of a job's build in Jenkins. If it is not building yet, it builds on
+    demand.
+
+    :param BuildJob job: A job's build.
+    """
+    # noinspection PyBroadException
     try:
-        short_name = job.get_job_short_name()
+        yield trollius.From(job.seek())
 
-        # 1. monitor progress until stops building
-        waiting = True
-        building = False
-        result = 'null'
-        while not job.cancelled and (waiting or building):
-            logging.debug("[{}] request to watch build".format(short_name))
-            monitor_ret = yield trollius.From(job.monitor())
-            if job.cancelled:
-                break
-            logging.debug("[{}] response to watch build is {}".format(
-                short_name, is_request_ok(monitor_ret)))
+        # monitor progress until stops building
+        build_requested = False
+        while not job.done:
+            yield trollius.From(job.monitor())
 
-            if is_request_ok(monitor_ret):
-                progress_content = json.loads(monitor_ret.content)
-                timestamp = progress_content['timestamp']  # in milliseconds
-                estimated = progress_content['estimatedDuration']
-                building = progress_content['building']
-                result = progress_content['result']
-                logging.debug("[{}] watch response content: {}, {}, {}".format(
-                    short_name, building, timestamp, estimated))
-            elif monitor_ret.status_code == requests.codes.not_found:
-                # If not found, it may mean it is first time there is a build
-                # for this job.
-                logging.debug("[{}] watch found no builds, will try to create build".format(
-                    short_name))
-            else:
-                job.status = STATUS_CONNECTION_ERROR
-                raise trollius.Return()
-
-            if waiting and not building and result == 'null':
-                # First we need to predict next build number
-                logging.debug("[{}] get last build id".format(short_name))
-                last_build_id_ret = yield trollius.From(job.get_last_build_id())
-                if is_request_ok(last_build_id_ret):
-                    last_build_id = last_build_id_ret.text.strip()
-                    logging.debug("[{}] previous build id is {}".format(short_name, last_build_id))
-                    next_build_id = '{}'.format(int(last_build_id) + 1)
-                    logging.debug("[{}] next build id is {}".format(short_name, next_build_id))
-                    job.update_job_id(next_build_id)
-                else:
-                    logging.debug("[{}] get last build id failed. Maybe first build?".format(short_name))
-
-                # If not building yet, request to start a build
-                logging.debug("[{}] request to build".format(short_name))
-                build_ret = yield trollius.From(job.build())
-                if job.cancelled:
-                    break
-                logging.debug("[{}] response to build is {}".format(short_name, is_request_ok(build_ret)))
-                if not is_request_ok(build_ret):
-                    job.status = STATUS_CONNECTION_ERROR
-                    raise trollius.Return()
-            else:
-                # Once build is running, follow especially this job. This avoids
-                # external restart of job messing with this watcher
-                waiting = False
-                fixed_timestamp = time.time() - timestamp / 1000
-
-                # Just save first duration, as printer is a lot more frequent
-                # than watchers, so it is better to increment duration there for
-                # better feedback
-                if job.duration is None:
-                    job.duration = fixed_timestamp
-
-                if estimated > 0:
-                    job.status = STATUS_BUILDING
-                    # Jenkins estimate not very reliable, be conservative
-                    fixed_estimated = ESTIMATE_UNRELIABILITY * estimated / 1000.
-                    progress = fixed_timestamp / fixed_estimated
-                    # Even with some unreliability factor, progress can
-                    # exceed 100%
-                    job.progress = min(progress, 0.99)
-                else:
-                    job.status = STATUS_UNKNOWN
+            if not job.building and not build_requested:
+                # If not building yet, request to start a build, but only once!
+                build_requested = True
+                yield trollius.From(job.build())
 
             yield trollius.sleep(WATCH_INTERVAL)
-
-        if job.cancelled:
-            # 3.1 if cancelled just mark as aborted
-            job.status = STATUS_ABORT
-        else:
-            # 3.2 once stopped building, one last request to get final status of job
-            logging.debug("[{}] request to get result".format(short_name))
-            result_ret = yield trollius.From(job.result())
-            logging.debug(
-                "[{}] response to get result is {}".format(short_name, is_request_ok(result_ret)))
-            if not is_request_ok(result_ret):
-                job.status = STATUS_CONNECTION_ERROR
-                raise trollius.Return()
-
-            result = json.loads(result_ret.content)
-            status = result['result']
-
-            if status == 'FAILURE':
-                job.status = STATUS_FAILURE
-            elif status == 'ABORTED':
-                job.status = STATUS_ABORT
-            elif status == 'SUCCESS':
-                job.status = STATUS_SUCCESS
-            else:
-                assert False, "Could not parse status {}".format(status)
-    except Exception as e:
-        if not isinstance(e, trollius.coroutines.Return):
-            job.status = STATUS_INTERNAL_ERROR
-            logging.exception("Internal error while trying to watch job progress")
-        else:
-            raise e
-    finally:
-        job.done = True
+    except trollius.CancelledError:
+        # When cancelled nothing to do
+        pass
+    except ConnectionError:
+        # Kind of expected error, network is outside of control, no need to report as
+        # some kind of critical error
+        pass
+    except:
+        job.status = STATUS_INTERNAL_ERROR
+        logging.exception("Internal error while trying to watch job progress")
 
 
 @trollius.coroutine
@@ -690,3 +804,13 @@ class Configuration:
     def __init__(self):
         self.user = None
         self.password = None
+
+
+class ConnectionError(RuntimeError):
+    """
+    When request returns a non-OK status.
+    """
+
+    def __init__(self, status_code, *args, **kwargs):
+        RuntimeError.__init__(self, *args, **kwargs)
+        self.status_code = status_code
