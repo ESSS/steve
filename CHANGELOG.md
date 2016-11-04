@@ -1,3 +1,20 @@
+0.6.2
+=====
+
+* More fixes related to quick builds, fixed issue where it would not start a new build and would instead detect old 
+builds
+* Fixed bugs in logging when a build was aborted
+
+0.6.1
+=====
+
+* Fixes related to quick builds detection
+
+0.6.0
+=====
+
+* Refactored to be able to monitor really quick builds
+
 0.5.1
 =====
 
