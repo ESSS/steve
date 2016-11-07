@@ -1,11 +1,7 @@
-name: steve
+name: steve-dev
 
 dependencies:
   - python==2.7.12
   - requests==2.9.1
   - trollius==2.0
   - pyyaml==3.11
-
-environment:
-  - PYTHONPATH:
-    - {{ os.path.join(root) }}
