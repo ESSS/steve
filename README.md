@@ -1,6 +1,8 @@
 steve
 =================
 
+![basic-usage](https://raw.githubusercontent.com/ESSS/steve/master/misc/steve_simple.gif)
+
 `steve` is a command-line tool tailored to how ESSS projects deal with
 Jenkins. From any git repo containing an ESSS project it should be
 possible to run a command line like:
@@ -52,6 +54,8 @@ values (accepted values are the usual ones: `win64`, `win32`,
 ```bash
 steve -u foo -m platform:win64,linux64
 ```
+
+![matrix-usage](https://raw.githubusercontent.com/ESSS/steve/master/misc/steve_matrix.gif)
 
 *Who is the most relevant mode? Can I change it too?*
 
